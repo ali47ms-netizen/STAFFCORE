@@ -1,19 +1,18 @@
 
-name: Build STAFFCORE APK
+name: Build STAFFCORE Release APK
 
 on:
   workflow_dispatch:
-  push:
-    paths:
-      - "STAFFCORE-PROJECT-UPDATED.zip"
-      - ".github/workflows/build-apk.yml"
+
+permissions:
+  contents: read
 
 jobs:
   build:
     runs-on: ubuntu-latest
 
     steps:
-      - name: Get repository files
+      - name: Checkout repository
         uses: actions/checkout@v4
 
       - name: Set up Java
@@ -27,23 +26,72 @@ jobs:
         with:
           node-version: "22"
 
-      - name: Extract STAFFCORE project
+      - name: Extract project
         run: |
           unzip STAFFCORE-PROJECT-UPDATED.zip
           cd STAFFCORE-Apps/android
           npm install
           npx cap add android
-          npx cap sync android
 
-      - name: Build APK
+      - name: Decode release keystore
+        env:
+          KEYSTORE_BASE64: ${{ secrets.KEYSTORE_BASE64 }}
         run: |
-          cd STAFFCORE-Apps/android/android
-          chmod +x gradlew
-          ./gradlew assembleDebug
+          test -n "$KEYSTORE_BASE64"
+          echo "$KEYSTORE_BASE64" | base64 --decode > "$RUNNER_TEMP/release.jks"
+          test -s "$RUNNER_TEMP/release.jks"
 
-      - name: Upload APK
+      - name: Configure release signing
+        working-directory: STAFFCORE-Apps/android/android
+        env:
+          STORE_PASSWORD: ${{ secrets.KEYSTORE_PASSWORD }}
+          KEY_ALIAS: ${{ secrets.KEY_ALIAS }}
+          KEY_PASSWORD: ${{ secrets.KEY_PASSWORD }}
+        run: |
+          cat >> gradle.properties <<EOF
+          STAFFCORE_STORE_FILE=$RUNNER_TEMP/release.jks
+          STAFFCORE_STORE_PASSWORD=$STORE_PASSWORD
+          STAFFCORE_KEY_ALIAS=$KEY_ALIAS
+          STAFFCORE_KEY_PASSWORD=$KEY_PASSWORD
+          EOF
+          python3 - <<'PY'
+          from pathlib import Path
+          p = Path("app/build.gradle")
+          s = p.read_text()
+          marker = "    signingConfigs {"
+          if marker not in s:
+              s = s.replace(
+                  "    buildTypes {",
+                  """    signingConfigs {
+                  release {
+                      storeFile file(STAFFCORE_STORE_FILE)
+                      storePassword STAFFCORE_STORE_PASSWORD
+                      keyAlias STAFFCORE_KEY_ALIAS
+                      keyPassword STAFFCORE_KEY_PASSWORD
+                  }
+              }
+
+              buildTypes {""",
+                  1
+              )
+          s = s.replace(
+              "release {",
+              "release {\\n            signingConfig signingConfigs.release",
+              1
+          )
+          p.write_text(s)
+          PY
+
+      - name: Build signed Release APK
+        working-directory: STAFFCORE-Apps/android/android
+        run: |
+          chmod +x gradlew
+          ./gradlew assembleRelease
+
+      - name: Upload Release APK
         uses: actions/upload-artifact@v4
         with:
-          name: STAFFCORE-APK
-          path: STAFFCORE-Apps/android/android/app/build/outputs/apk/debug/app-debug.apk
+          name: STAFFCORE-RELEASE-APK
+          path: STAFFCORE-Apps/android/android/app/build/outputs/apk/release/*.apk
+          if-no-files-found: error
           
